@@ -1,0 +1,7 @@
+__pycache__/
+*.pyc
+dist/
+*.BAK_*
+*.zip
+wave*.json
+*_decode.json
