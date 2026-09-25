@@ -1,0 +1,16 @@
+# 运行产物 / 沙箱输出
+scripts/i2c_sandbox_out/
+scripts/i2c_out/
+scripts/i2c_out_bulk/
+scripts/_*.log
+*.pyc
+__pycache__/
+
+# 波形与截图产物
+*.png
+wave*.json
+decode.json
+*_decode.json
+plan*.json
+*.xlsx
+~$*.xlsx
