@@ -1,0 +1,11 @@
+# Core dependencies
+numpy>=1.20.0
+
+# Optional: Excel report filling
+openpyxl>=3.0.0
+
+# Optional: OCR screenshot verification (recommended for production use)
+rapidocr-onnxruntime>=1.2.0
+
+# Optional: Alternative OCR engine (slower, no extra dependencies)
+# tesseract>=5.0.0  # Install separately on system

@@ -2,6 +2,7 @@
 name: keysight-scope-i2c
 description: 通过 SCPI（TCP 5025）远程操作 Keysight/Agilent InfiniiVision 示波器（DSO-X 6000X/3000T/2000X 等 WinCE 机型），完成 I2C 总线时序测量的端到端工作流——定位目标窗口、1ns 高分辨率取数与双通道拼接、I2C 事务解码（START/地址/ACK/STOP）、13 个时序参数（含 tBUF 总线空闲）计算与规格判定、Tr/Tf 按 30%-70% 规范口径逐沿测量、游标闭环复核、示波器截图，最后把结果回填进带 OLE 嵌入对象的 Excel 测试报告。支持标准/快速/SMBus(PMBus)三档规格（电源兼容性测试场景）。当用户要测 I2C 时序（fSCL/tHIGH/tLOW/tSU;STA/tHD;STA/tSU;STO/tSU;DAT/tHD;DAT/tBUF/Tr/Tf）、算上升下降时间、判 PASS/FAIL、排查 Tr 超规格，或要求把实测值写回测试报告表格时使用。也用于**验收别人（同事或别的 Agent）生成的 I2C 测试代码是否可信** —— 用合成已知答案波形对拍，不需要真机，5 分钟出结论（含五条红线：fSCL 差 2 倍、Tr/Tf 漏测、桩函数报 PASS、记录起点翻转 tHIGH/tLOW、数据不足仍判 PASS）。内含两条最贵的教训：Tr/Tf 必须用 30%-70% 口径（用 10%-90% 会虚高 2-3 倍、把合格判成超规格），以及含 OLE 嵌入对象的 xlsx 绝不能用本地 Office 编辑器或 openpyxl 保存（会静默摧毁嵌入包）。提效手段：一键自动配置示波器（Auto Scale + I2C 触发）、多器件批量回填（batch）、参数化流水线（i2c_full_test.py）。
 agent_created: true
+version: "1.0.0"
 ---
 
 # Keysight 示波器 I2C 时序测量（端到端）
@@ -28,8 +29,25 @@ agent_created: true
 先跑自检确认环境正常：
 
 ```bash
-python scripts/selftest.py          # 纯函数自测，24 项。报"不合格"之前必须先跑这个
+python scripts/selftest.py          # 纯函数自测，33 项。报"不合格"之前必须先跑这个
 python scripts/scope.py <IP>        # 只读摸底：IDN、时基、通道、采样率（不改任何设置）
+```
+
+**快速启动（推荐）**：根目录的 `run_i2c_test.py` 是统一入口，自动把 `scripts/` 加入 `sys.path`，不需要 cd。所有连真机的子命令都要求显式传 `--ip`（不再有隐式默认值）：
+
+```bash
+python run_i2c_test.py --help                    # 列出全部子命令
+
+# 判定前必跑（不连真机）
+python run_i2c_test.py selftest                  # 纯函数自测 33 项
+python run_i2c_test.py sandbox                   # 沙箱端到端（不连真机）
+python run_i2c_test.py full                      # 全量低速覆盖报告（不连真机）
+
+# 连真机
+python run_i2c_test.py connect --ip <IP>         # 连接示波器，显示状态
+python run_i2c_test.py check --ip <IP>           # 信号摸底：峰峰值、频率
+python run_i2c_test.py test --ip <IP> --addr 0x5B --spec std  # 完整流水线
+python run_i2c_test.py batch --ip <IP> --addr 0x58,0x59,0x5A  # 多地址批量（逗号分隔）
 ```
 
 ## 规范口径 ⚠️ 读这一节能省你两小时
@@ -68,6 +86,20 @@ python scripts/scope.py <IP>
 先把现场摸清楚再动手 —— 尤其**用户说「已经截好图了」时，仪器大概率在 STOP 冻结态，发 `:RUN` 会立刻覆盖那屏波形，不可恢复**。
 
 **先确认输入端真有信号：** 4 通道各取 3000 点，看 `y[min,max]`。全 ~0V 平线 → 探头脱落 / DUT 掉电，此时任何「测量」都是噪声，不要继续、更不要凭噪声出数。
+
+**空闲 I²C 总线也应该是高电平**（上拉电阻把 SCL/SDA 拉到 VDD，3.3 V 或 1.8 V）。
+把档位放到 `1 V/div`、offset ≈ 2 V 再读一次，就能区分三种情况：
+
+| 读到的电平 | 含义 | 处置 |
+|---|---|---|
+| 稳定高电平（≈VDD） | 探头夹对了，总线只是**空闲** | DUT 没在发事务 → 需触发主机发一帧，或检查器件是否在跑 |
+| 0 V / 噪声地板（<0.2 V） | **探头没夹到点 / 没接地 / 板子没上电** | 查接线与供电，别急着测 |
+| 明显 50 Hz 工频纹波 | 地线没接好 | 先接好探头地 |
+
+⚠️ **`:TRIGger:STATus?` 在 RUN 态下会挂满 socket 超时**（2026-09-28 实测，STOP 态秒回）。
+配合 `q()` 默认重试 3 次 → 60 s 超时 = **假死 3 分钟**，现场看着像仪器掉线。
+已内置 `Scope.q_short()` 兜住（`state()` 已改走它，从 180 s 降到 3.5 s）。
+**判断"有没有信号"看波形边沿数，别依赖触发状态。** 详见 `references/pitfalls.md` C5。
 
 ### 步骤 2 · 1ns 高分辨率取数
 
@@ -160,6 +192,17 @@ python scripts/scope.py <IP> --shot out.png      # 或走 i2c_workflow / scope.p
 ```
 
 逐张对应参考图的时基 / 水平位置 / 垂直档复现。**收尾务必 `:MARKer:MODE OFF`**，别把游标线留在交付截图里。
+
+#### ⚠️ 连机先确认 `:SCReen:DUMP?` 到底通不通（机台相关，2026-09-28 实测）
+
+| 路径 | 效果 | 实测可用性 |
+|---|---|---|
+| `:SCReen:DUMP?`（`screenshot_dump()`） | **黑底整屏**，X1/X2/ΔX/1÷ΔX 全渲染 | ✅ `.155` 机可用；❌ **`.251` 机 RUN/STOP 两态均超时（60 s / 30 s 无字节）** |
+| `:DISPlay:DATA?`（`screenshot()`） | 白底，**只渲染 X2，X1 不画** | ✅ 两机均可用 |
+
+**别假定 `:SCReen:DUMP?` 一定可用。** 连机后先各试一次并记录结果；若该路径不通，
+取证图改用 `:DISPlay:DATA?`，并在报告里如实标注「本机不支持 X1 渲染」，
+**不要谎称游标已经画上去了**。兜底方案：本地自绘标注图 + 标注「数据重建图」。
 
 #### ⚠️ 拍完必须 OCR 验收右侧面板 —— "文件存下来了" ≠ "面板有数"（2026-09-24 实测）
 
@@ -281,6 +324,12 @@ python scripts/i2c_full_test.py --addr 0x5B --out D:/_scope_tmp/0x5B \
 - **`--xlsx` + `--sheet 时序测试`**：含 OLE 嵌入对象时，`fill` 一律走 `xlsx_cellpatch.py`（zip/XML 层），OLE 一字节不丢。
 - **`--addr`**：器件地址（如 `0x5B`，Excel B 列是大写 `0X5B`，工具大小写兼容自动匹配行）。
 - **`--trigger-addr` / `--trigger-cond`**：`setup` 用——I2C 触发地址(7 位)与条件(START/STARTR/STOP/ADDR/NACK)。
+  ⚠️ **并非每台机都装了 I2C 触发选件**：实测 DSO-X 6004A `10.121.136.251` 执行
+  `:TRIGger:MODE I2C` 返回 `-224,"Illegal parameter value"` + 3×`-113,"Undefined header"`，
+  `setup` 会自动降级为**边沿触发**（SCL 下降沿 + 电平≈VDD/2）。
+  这种情况下**无法按地址触发**，只能：① `:SINGle` 抓一屏 → ② **解码首字节确认器件地址**
+  （如 `0xB4` → 0x5A+WRITE），抓到目标器件再往下走；抓错就重抓。
+  `:TRIGger:MODE?` 返回 `EDGE` 即说明走的是降级路径。
 - **`--addr-list` / `--base-out`**：`batch` 用——地址空格列表 + 各器件 wave.json 根目录（子目录为 `<addr>`）。
 - 游标截图走 `Scope.screenshot_dump()`（`:SCReen:DUMP?` + `:HARDcopy:INKSaver OFF`，黑底、X1/X2/ΔX 全渲染）；白底 `:DISPlay:DATA?` 画不出 X1，已弃用。
 - 测量面板加完测量后 `add_meas` 默认 `fix_last_row=True`：等 ~3 s 切到测量页 → 重发最后一条测量命令刷出「未完成」那行。
@@ -302,6 +351,67 @@ python scripts/i2c_full_test.py --addr 0x5B --out D:/_scope_tmp/0x5B \
 `fill` 在 Excel 副本上回填 **29 处**（SCL 行 16 + SDA 行 13），与已验证映射逐项一致，OLE 2 嵌入对象完好、158 条目、体积不变。
 `batch` 在 4 地址副本上端到端验证：4/4 回填、OLE 完好。`tBUF` 修复（按时刻排序事件）有回归测试锁定。
 → 工具已具备「下次任何 PSU 直接复用」的可靠性。
+
+## 步骤 10 · 单器件复测 + 标准取证图集（`scripts/redo_psu.py`）⭐
+
+器件复测（如 0x5A 补图）走这个脚本：一键出 **9 张标准图**（对齐 0x59/0x5B 图集口径），
+并串起 削顶闸门 + 地址闸门 + 游标闭环。
+
+### 子命令
+
+```
+precheck   连接 + 档位/削顶预检（★ 开测前必做）
+snapshot   改显示前先备份当前屏幕为 00
+grab       ★ 反复 arm 触发→取数→解码，直到命中 --addr 那一帧（无 I2C 触发选件时必需）
+capture    STOP 后读当前采集内存取数（★ 这一条不会重新触发）
+decode     wave.json → decode.json（DC 电气 + 时序判定 + 地址闸门）
+cursors    算 5 组游标边沿对
+shots      出 9 张标准取证图（每张出图前自动校回时基）
+all        precheck → snapshot → grab → capture → decode → cursors → shots
+```
+
+### ★ 地址闸门：没有 I2C 触发选件时，`--addr` 只是"文件名"
+
+**实测（2026-09-28，DSO-X 6004A `10.121.136.251`）**：本机 `:TRIGger:MODE I2C` 返回
+`-224 Illegal parameter value`（**无 I2C 触发选件**），只能退化为 SCL 边沿触发。
+此时 `--addr` **完全不参与触发**，抓到哪一帧是随机的 —— 实测连续三次分别抓到
+`0x59 → 0x58 → 0x5B`（四个 PSU 地址都在同一条总线上轮流通信）。
+
+❗**真实误归档**：当日因此把一帧 0x58 的波形按 0x5A 命名归档、复制进桌面图集、
+还更新了完整度说明文档 —— 而 `decode.json` 里 `addr7: "0x58"` 白纸黑字写着，只是没人核对。
+**张冠李戴的取证数据比没有数据更坏。**
+
+**闸门（已焊死）**：`decode` / `shots` 都比对「实测 `addr7` == `--addr`」，不匹配即中止；
+`shots` 若缺 `decode.json` 直接拒绝出图。确要接受任意帧才加 `--allow-any-addr`。
+
+```bash
+# 正确流程：让 grab 自动重试直到命中目标地址
+python scripts/redo_psu.py --ip <IP> --addr 0x5A --out D:/_scope_tmp/0x5A \
+    --tb 200e-6 grab cursors shots
+```
+
+### ★ DC 电气要单独用小档位抓
+
+`VOL ≤ 0.4 V @3 mA` 需要足够的量化分辨率。2 V/div 时满量程 16 V、8 bit → **LSB ≈ 67 mV**，
+是门限的 17%，读数只能落在 67 mV 的格子上 → 判定为 **INDET（不可判定）**，
+既不能算合格也不能算超标。测 VOL 改用 `--ch-scale 0.5 --ch-offset 1.65`
+（满量程 4 V、LSB ≈ 16 mV）：
+
+```bash
+python scripts/redo_psu.py --ip <IP> --addr 0x5A --out D:/_scope_tmp/0x5A_dc \
+    --tb 200e-6 --ch-scale 0.5 --ch-offset 1.65 grab
+```
+
+### 电压判定三级：PASS / FAIL / INDET
+
+- VOL/VOH 取**低/高电平样本的 P90 / P10**（稳态最坏值），同时另存 P50 典型值。
+  **不要用 P98/P2** —— 边沿过渡点实测占 4.6%，2% 的余量兜不住
+  （曾把 VOL 报成 1.457 V，而稳态实测只有 0.118 V）。
+- `|实测 − 门限| < 1 LSB` → **INDET**（提示换小档位），而不是硬判 PASS/FAIL。
+- LSB 由采样值反推（唯一取值相邻间隔的中位数，**分通道各估再取中位**；
+  混通道估会把步长算小：合并 42.1 mV vs 分通道 66.9 mV）。
+
+---
 
 ## 验收别人生成的测试代码（不连真机，5 分钟出结论）
 
@@ -390,29 +500,55 @@ I2C 低速测试**不止时序量**，按规范分四层。本工具（Keysight 
 
 ## 工具箱
 
+> 完整索引见上方 **[文件索引](#文件索引)**，按用途分类列出所有脚本和参考文档。
+
+## 文件索引
+
+### 根目录文件
+
+| 文件 | 说明 |
+|---|---|
+| `run_i2c_test.py` | 统一快速启动入口（selftest / sandbox / full / connect / check / test / batch / run / setup） |
+| `requirements.txt` | Python 依赖：`numpy>=1.20.0`, `openpyxl>=3.0.0`, `rapidocr-onnxruntime>=1.2.0` |
+| `VERSION` | 当前版本 `__version__ = "1.0.0"` |
+| `CHANGELOG.md` | 完整变更日志（覆盖矩阵、依赖、Resolved Issues） |
+
+### scripts/
+
 | 脚本 | 用途 |
 |---|---|
-| `scripts/scope.py` | 连接/重连、查询、块读、取波形、截图、测量面板、位置扫描（含 `--shot`） |
-| `scripts/i2c_full_test.py` | **一键全量流水线**（connect/check/capture/decode/cursors/shots/verify/fill/run），把全部坑焊死进参数化入口，新器件/复测直接复用 |
-| `scripts/i2c_decode.py` | 事务解码 + 6 个时序量 + **DC 电气(VIH/VIL/VOH/VOL/Cb)** + **时钟拉伸/毛刺(tSPIKE)/重复START** + 规格判定（Tr/Tf 30%–70% 口径） |
-| `scripts/tr_measure.py` | **30%–70% 规范口径** Tr/Tf 逐沿测量（含 MAD 离群剔除） |
-| `scripts/i2c_workflow.py` | 一键：连接 → 1ns 取数 → 存 JSON → 调解码器出结果 |
-| `scripts/selftest.py` | 纯函数自测（33 项，含 DC/拉伸/毛刺/Sr 新分析块），判定前的强制关卡 |
-| `scripts/mem_scan.py` | 扫描整个采集内存，判「空闲 vs 真实活动」，先锁定目标区段 |
-| `scripts/cmd_measure.py` | 按参考图设时基、扫水平位置出数、逐张截图 |
-| `scripts/cmd_dump.py` | 多窗口拼接导出整段波形；验证缩放是否触发重新采集 |
-| `scripts/xlsx_cellpatch.py` | **含 OLE 的 xlsx** 安全改写（zip/XML 层，保留嵌入对象） |
-| `scripts/fill_excel.py` | 普通 xlsx 回填（编辑器路线：备份→写→保存→回读校验） |
-| `scripts/synthetic_verify.py` | **合成已知答案波形对拍器**：不连真机，验收任意 I2C 测试实现（含五条红线检查、相位无关性实验） |
-| `scripts/mock_scope.py` | **沙箱仿真示波器**：本地 TCP(5051) 最小 SCPI 子集 + 合成 I2C 波形（含时钟拉伸/重复START/毛刺）+ PNG，不连真机即可喂 `Scope` 客户端 |
-| `scripts/sandbox_test.py` | **沙箱端到端验证**：起 mock 跑全套在线链路(connect→verify)并断言时序/DC/拉伸/毛刺合理、截图落盘 |
-| `scripts/full_lowspeed_test.py` | **全量低速测试覆盖报告**：DC + 时钟 + 6 时序量×三档 + Tr/Tf + 拉伸/毛刺/Sr 一次跑全并判定，落 MD 报告 |
+| `scope.py` | 连接/重连、查询、块读、取波形、截图、测量面板、位置扫描（含 `--shot`） |
+| `i2c_full_test.py` | **一键全量流水线**（connect/check/capture/decode/cursors/shots/verify/fill/run），把全部坑焊死进参数化入口，新器件/复测直接复用 |
+| `i2c_decode.py` | 事务解码 + 6 个时序量 + **DC 电气(VIH/VIL/VOH/VOL/Cb)** + **时钟拉伸/毛刺(tSPIKE)/重复START** + 规格判定（Tr/Tf 30%–70% 口径） |
+| `tr_measure.py` | **30%–70% 规范口径** Tr/Tf 逐沿测量（含 MAD 离群剔除） |
+| `i2c_workflow.py` | 一键：连接 → 1ns 取数 → 存 JSON → 调解码器出结果 |
+| `selftest.py` | 纯函数自测（33 项，含 DC/拉伸/毛刺/Sr 新分析块），判定前的强制关卡 |
+| `mem_scan.py` | 扫描整个采集内存，判「空闲 vs 真实活动」，先锁定目标区段 |
+| `cmd_measure.py` | 按参考图设时基、扫水平位置出数、逐张截图 |
+| `cmd_dump.py` | 多窗口拼接导出整段波形；验证缩放是否触发重新采集 |
+| `xlsx_cellpatch.py` | **含 OLE 的 xlsx** 安全改写（zip/XML 层，保留嵌入对象） |
+| `fill_excel.py` | 普通 xlsx 回填（编辑器路线：备份→写→保存→回读校验） |
+| `synthetic_verify.py` | **合成已知答案波形对拍器**：不连真机，验收任意 I2C 测试实现（含五条红线检查、相位无关性实验） |
+| `mock_scope.py` | **沙箱仿真示波器**：本地 TCP(5051) 最小 SCPI 子集 + 合成 I2C 波形（含时钟拉伸/重复START/毛刺）+ PNG，不连真机即可喂 `Scope` 客户端 |
+| `sandbox_test.py` | **沙箱端到端验证**：起 mock 跑全套在线链路(connect→verify)并断言时序/DC/拉伸/毛刺合理、截图落盘 |
+| `full_lowspeed_test.py` | **全量低速测试覆盖报告**：DC + 时钟 + 6 时序量×三档 + Tr/Tf + 拉伸/毛刺/Sr 一次跑全并判定，落 MD 报告 |
+| `redo_psu.py` | PSU 复测脚本（取数后强制**削顶自检**；档位不对当场报错；然后一键出齐 8+1 张标准取证图，与 0x59/0x5B 图集口径对齐） |
+
+### references/
+
+| 文件 | 说明 |
+|---|---|
+| `i2c_spec.md` | I²C 标准/快速模式完整规格表、判定口径（含 SMBus 额外参数） |
+| `scpi-cookbook.md` | SCPI 命令全表、正确/错误形式对照、错误码表、采集快照对照值 |
+| `pitfalls.md` | 全部实测坑位汇编（A: 测量口径, B: 采集, C: 仪器状态, D: 现场纪律, E: Excel 报告, F: 环境） |
 
 ## 详细参考
 
-- **[references/i2c_spec.md](references/i2c_spec.md)** —— I²C 标准/快速模式完整规格表、判定口径
-- **[references/scpi-cookbook.md](references/scpi-cookbook.md)** —— SCPI 命令全表、正确/错误形式对照、错误码表、采集快照对照值
-- **[references/pitfalls.md](references/pitfalls.md)** —— 全部实测坑位汇编（含 `:PROBe` 改不动、面板 BWLimit 高亮假象、拼接数据步长不统一等）
+按需查阅：
+
+- **[references/i2c_spec.md](references/i2c_spec.md)** —— 规格表、口径对比表、SMBus 额外参数
+- **[references/scpi-cookbook.md](references/scpi-cookbook.md)** —— SCPI 命令对照表、错误码表
+- **[references/pitfalls.md](references/pitfalls.md)** —— 6 类坑位实测经验（采集、仪器状态、Excel 报告等）
 
 ## 环境纪律（实测教训）
 

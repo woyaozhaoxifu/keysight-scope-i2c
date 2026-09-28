@@ -36,7 +36,7 @@ def make_args(**kw):
 
 
 def vmark(v):
-    return {"PASS": "✅", "FAIL": "❌", "NA": "N/A"}.get(v, v)
+    return {"PASS": "[PASS]", "FAIL": "[FAIL]", "NA": "N/A"}.get(v, v)
 
 
 def fmt_spec(v):
@@ -70,10 +70,10 @@ def main():
     for nm, fn in steps:
         try:
             fn(make_args(out=out, trigger_addr=91 if nm == "setup" else None))
-            L("  ✅ %s" % nm)
+            L("  [OK]   %s" % nm)
         except Exception as e:
             fails += 1
-            L("  ❌ %s: %s" % (nm, e))
+            L("  [FAIL] %s: %s" % (nm, e))
     L()
 
     wave_path = os.path.join(out, "wave.json")
@@ -99,13 +99,13 @@ def main():
     for ch, c in d["checks"].items():
         L("| %s VOH_min | %s V | ≥ %.3f V | %s |"
           % (ch, d["voh_%s_min_v" % ch.lower()], d["vih_min_v"],
-             "✅" if c["vih_ok"] else "❌"))
+             "[OK]" if c["vih_ok"] else "[FAIL]"))
         L("| %s VOL_max | %s V | ≤ %.3f V (≤0.4V@3mA) | %s |"
           % (ch, d["vol_%s_max_v" % ch.lower()], d["vil_max_v"],
-             "✅" if c["vol_ok"] else "❌"))
+             "[OK]" if c["vol_ok"] else "[FAIL]"))
     if d["cb_pf"] is not None:
         L("| 总线电容 Cb | %.2f pF | ≤ 400 pF | %s |"
-          % (d["cb_pf"], "✅" if d["cb_pf"] <= 400 else "❌"))
+          % (d["cb_pf"], "[OK]" if d["cb_pf"] <= 400 else "[FAIL]"))
         L("  （Cb 由 Tr 反推：Cb = Tr/(0.8473·Rp)，Rp=%.0fΩ）" % d["rp_ohm"])
     L()
 
@@ -155,8 +155,8 @@ def main():
                 fm_max = 300                            # fm: 均为 300ns
                 ok_std = ns <= std_max
                 ok_fm = ns <= fm_max
-                verdict = ("✅ std / ❌ fm" if ok_std and not ok_fm
-                           else ("✅" if ok_std else "❌"))
+                verdict = ("PASS std / FAIL fm" if ok_std and not ok_fm
+                           else ("PASS" if ok_std else "FAIL"))
                 L("| %s | %s | %.1f | %dns | %dns | %s |"
                   % (ch.upper(), kk.upper(), ns, std_max, fm_max, verdict))
     L()
@@ -182,11 +182,11 @@ def main():
                 if res[sp]["timings"][k]["verdict"] == "PASS")
     L("  - 三档 × 6 时序量 = 18 项判定：**PASS %d**、**N/A %d**"
       % (npass, na_count))
-    L("  - 链路 8 环节：%s" % ("全部跑通 ✅" if fails == 0 else "%d 项失败 ❌" % fails))
+    L("  - 链路 8 环节：%s" % ("全部跑通 [OK]" if fails == 0 else "%d 项失败 [FAIL]" % fails))
     L("  - 时钟 / Tr·Tf / DC 电平(VOH·VOL·VIH·VIL)·Cb 均已实测并对照规范。")
     L("  - 协议健壮性：时钟拉伸 %d 段、毛刺 %d 处、重复 START %s —— 均已检出。"
       % (cs["n"], sp["n"], "有" if sr else "无"))
-    L("  - ⚠️ 沙箱为仿真非真机：仅验证代码路径与解析逻辑；真实信号质量（探头比、是否真超规格）仍以真机为准。")
+    L("  - [!] 沙箱为仿真非真机：仅验证代码路径与解析逻辑；真实信号质量（探头比、是否真超规格）仍以真机为准。")
     L()
     L("### 本工具**不能**测的项（需 I2C 主控制器主动发事务，示波器被动测量做不了）")
     L("  - 功能层：设备扫描(i2cdetect)、寄存器读写、总线卡死恢复(9 脉冲解锁)、热插拔、POR 时序。")
@@ -199,7 +199,12 @@ def main():
     rpath = os.path.join(out, "full_lowspeed_report.md")
     with open(rpath, "w", encoding="utf-8") as f:
         f.write(report)
-    print(report)
+    try:
+        print(report)
+    except UnicodeEncodeError:
+        # GBK 终端打印不了 emoji，降级纯 ASCII 输出
+        ascii_report = report.encode("ascii", "replace").decode("ascii")
+        print(ascii_report)
     print("\n报告已落盘 -> " + rpath)
     return 0 if fails == 0 else 1
 

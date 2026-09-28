@@ -361,16 +361,16 @@ def do_verify(args):
         has_delta = ("ΔX" in joined) or ("XDEL" in joined.upper()) or ("1÷ΔX" in joined)
         flag = ""
         if has_unfinished:
-            flag += " ⚠️含未完成 "
+            flag += " [!]含未完成 "
             bad += 1
         if "光标" in joined and not has_delta:
-            flag += " ⚠️游标页缺ΔX "
+            flag += " [!]游标页缺DX "
             bad += 1
         print("  %-40s 文本%d%s" % (f, len(txt), flag))
         if args.verbose:
             for x in txt:
                 print("      | %s" % x)
-    print("\n结果: %s" % ("全部通过 ✅" if bad == 0 else "%d 张需复核 ⚠️" % bad))
+    print("\n结果: %s" % ("全部通过 [PASS]" if bad == 0 else "%d 张需复核 [WARN]" % bad))
     return 0 if bad == 0 else 2
 
 
@@ -463,7 +463,7 @@ def do_setup(args):
         if args.trigger_addr is not None:
             print("[setup] 触发地址 = 0x%02X（%d）" % (args.trigger_addr, args.trigger_addr))
         if errs:
-            print("⚠️ 配置 I2C 触发报错（很可能未授权 DSO-I2C 选件）:")
+            print("[!] 配置 I2C 触发报错（很可能未授权 DSO-I2C 选件）:")
             for e in errs:
                 print("   ", e)
             print("   -> 降级方案：手动边沿触发 —— 触发源设 SCL(CH%d)，斜率=下降，"

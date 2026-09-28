@@ -1,0 +1,6 @@
+# Keysight I2C Test Skill Version
+__version__ = "1.0.2"
+__author__ = "LLiA"
+__date__ = "2026-09-28"
+
+# 版本历史见 CHANGELOG.md

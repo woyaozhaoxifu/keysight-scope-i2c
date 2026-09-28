@@ -11,6 +11,7 @@
 
 ★ 这是「仿真」不是「真机」，只验证代码路径与数据解析；数值合规性以真机为准。
 """
+import os
 import socket
 import sys
 import threading
@@ -24,6 +25,12 @@ YINC = 0.001   # 1 mV/码（y = yinc * raw，mock 用 yorg=0/yref=0）
 XINC = 1e-9    # 1 ns/点
 NPTS = 700000  # 700 µs 满记录（容纳 拉伸事务 + Sr 复合读事务 + 间隔，1ns/点）
 RAMP = 50e-9   # 50 ns 过渡（远小于 100 kHz 周期，Tr/Tf 算出来远小于规范上限）
+
+# 通道垂直档位（可用环境变量覆盖）——便于用沙箱验证「削顶/档位自检」这条新路径：
+#   默认 1 V/div + 1.65 V 偏置 → 量程 -2.35..+5.65 V，3.3 V 波形不削顶（正常）
+#   设 MOCK_CH_SCALE=0.5 MOCK_CH_OFFS=0 → 量程 ±2 V，3.3 V 会削顶（复现 0x59 那次的事故）
+CH_SCALE = float(os.environ.get("MOCK_CH_SCALE", "1.0"))
+CH_OFFS = float(os.environ.get("MOCK_CH_OFFS", "1.65"))
 
 # 一张最小合法 PNG（截图验证不解析内容，只验证取数+落盘链路）
 _PNG = (b'\x89PNG\r\n\x1a\n\x00\x00\x00\rIHDR\x00\x00\x00\x01\x00\x00\x00\x01'
@@ -180,13 +187,16 @@ class _Handler(threading.Thread):
     def dispatch(self, cmd):
         if not cmd:
             return
-        # 注意：Scope 发出的 SCPI 是固定混合大小写（如 :WAVeform:POINts?），
-        # 这里一律按「原样命令」匹配，不做 upper()，否则查询会静默不回。
+        # ★ SCPI 命令头**大小写不敏感**（真机行为）：命令头统一用 upper() 匹配，
+        #   只有**参数值**（如 CHANnel2）保留原样。
+        #   曾因只按「原样」匹配，把 fetch 发出的 :TIMebase:RANge?（小写 e）判成未识别
+        #   → 返回空串 → qf 取默认 0 → 取数点数退化成 4000，沙箱假失败。
         srv = self.srv
+        u = cmd.upper()
         has_q = "?" in cmd
         # ---- 块数据 ----
-        if "DATA?" in cmd or "DUMP?" in cmd:
-            if "WAV" in cmd:
+        if "DATA?" in u or "DUMP?" in u:
+            if "WAV" in u:
                 data = _WAVES.get(srv.source, _WAVES["CHANnel1"])
                 pts = min(srv.points, len(data) // 2)
                 self.conn.sendall(_block(data[:pts * 2]))
@@ -194,83 +204,83 @@ class _Handler(threading.Thread):
                 self.conn.sendall(_block(_PNG))
             return
         # ---- 设置类（静默，但维护少量状态）----
-        if ":WAVeform:SOURce" in cmd:
-            srv.source = cmd.split()[-1]          # 保留原样，匹配 _WAVES 键
+        if ":WAVEFORM:SOURCE" in u:
+            srv.source = cmd.split()[-1]          # 参数保留原样，匹配 _WAVES 键
             return
-        if ":WAVeform:POINts" in cmd and not has_q:
+        if ":WAVEFORM:POINTS" in u and not has_q:
             try:
                 srv.points = max(1, min(NPTS, int(cmd.split()[-1])))
             except Exception:
                 pass
             return
-        if ":TRIGger:MODE" in cmd and not has_q:
+        if ":TRIGGER:MODE" in u and not has_q:
             srv.trigger_mode = cmd.split()[-1].upper()
             return
-        if ":MARKer:MODE" in cmd and not has_q:
+        if ":MARKER:MODE" in u and not has_q:
             srv.marker_mode = cmd.split()[-1].upper()
             return
         # 其余无返回的仪器命令（AUToscale / MEASure:* / RUN / STOP / HARDcopy /
         # MARKer:X* / CHANnel:DISPlay / TIMebase:*），全部静默
         if not has_q:
             return
-        # ---- 查询类（带 ?）----
-        if cmd == "*IDN?":
+        # ---- 查询类（带 ?，统一用 u=upper() 匹配）----
+        if u == "*IDN?":
             self._send("MockKeysight,DSO-X 6004A,MOCK0001,1.0"); return
-        if ":SYSTem:ERRor?" in cmd:
+        if ":SYSTEM:ERROR?" in u:
             self._send('0,"No error"'); return
-        if ":CHANnel" in cmd and ":PROBe?" in cmd:
+        if ":CHANNEL" in u and ":PROBE?" in u:
             self._send("10"); return
-        if ":CHANnel" in cmd and ":DISPlay?" in cmd:
+        if ":CHANNEL" in u and ":DISPLAY?" in u:
             self._send("1"); return
-        if ":CHANnel" in cmd and ":SCALe?" in cmd:
-            self._send("0.5"); return
-        if ":CHANnel" in cmd and ":OFFSet?" in cmd:
-            self._send("0"); return
-        if ":CHANnel" in cmd and ":COUPling?" in cmd:
+        if ":CHANNEL" in u and ":SCALE?" in u:
+            self._send("%.10g" % CH_SCALE); return
+        if ":CHANNEL" in u and ":OFFSET?" in u:
+            self._send("%.10g" % CH_OFFS); return
+        if ":CHANNEL" in u and ":COUPLING?" in u:
             self._send("DC"); return
-        if ":CHANnel" in cmd and ":BWLimit?" in cmd:
+        if ":CHANNEL" in u and ":BWLIMIT?" in u:
             self._send("0"); return
-        if ":CHANnel" in cmd and ":IMPedance?" in cmd:
+        if ":CHANNEL" in u and ":IMPEDANCE?" in u:
             self._send("ONEMeg"); return
-        if ":TIMebase:SCALe?" in cmd:
+        if ":TIMEBASE:SCALE?" in u:
             self._send("2e-5"); return
-        if ":TIMebase:POSition?" in cmd:
+        if ":TIMEBASE:POSITION?" in u:
             self._send("0"); return
-        if ":TIMebase:RANGe?" in cmd:
+        if ":TIMEBASE:RANGE?" in u:
             self._send("7e-4"); return
-        if ":TIMebase:MODE?" in cmd:
+        if ":TIMEBASE:MODE?" in u:
             self._send("MAIN"); return
-        if ":ACQuire:TYPE?" in cmd:
+        if ":ACQUIRE:TYPE?" in u:
             self._send("NORMAL"); return
-        if ":ACQuire:SRATe?" in cmd:
+        if ":ACQUIRE:SRATE?" in u:
             self._send("1e9"); return
-        if ":ACQuire:POINts?" in cmd:
+        if ":ACQUIRE:POINTS?" in u:
             self._send(str(srv.points)); return
-        if ":TRIGger:MODE?" in cmd:
+        if ":TRIGGER:MODE?" in u:
             self._send(srv.trigger_mode); return
-        if ":TRIGger:SWEep?" in cmd:
+        if ":TRIGGER:SWEEP?" in u:
             self._send("AUTO"); return
-        if ":TRIGger:STATus?" in cmd:
+        if ":TRIGGER:STATUS?" in u:
             self._send("TRIGGERED"); return
-        if ":OPERegister:CONDition?" in cmd:
+        if ":OPEREGISTER:CONDITION?" in u:
             self._send("0"); return
-        if ":MARKer:MODE?" in cmd:
+        if ":MARKER:MODE?" in u:
             self._send(srv.marker_mode); return
-        if ":MEASure:SOURce?" in cmd:
+        if ":MEASURE:SOURCE?" in u:
             self._send("CHAN1"); return
-        if ":WAVeform:POINts?" in cmd:
+        if ":WAVEFORM:POINTS?" in u:
             self._send(str(srv.points)); return
-        if ":WAVeform:XINCrement?" in cmd:
+        if ":WAVEFORM:XINCREMENT?" in u:
             self._send("%.6e" % XINC); return
-        if ":WAVeform:XORigin?" in cmd:
+        if ":WAVEFORM:XORIGIN?" in u:
             self._send("0"); return
-        if ":WAVeform:XREFerence?" in cmd:
+        if ":WAVEFORM:XREFERENCE?" in u:
             self._send("0"); return
-        if ":WAVeform:YINCrement?" in cmd:
+        if ":WAVEFORM:YINCREMENT?" in u:
             self._send("%.6e" % YINC); return
-        if ":WAVeform:YORigin?" in cmd:
+        if ":WAVEFORM:YORIGIN?" in u:
             self._send("0"); return
-        if ":WAVeform:YREFerence?" in cmd:
+        if ":WAVEFORM:YREFERENCE?" in u:
             self._send("0"); return
         # 未识别查询：回一个空值（避免阻塞 q() 的读循环）
         self._send(""); return

@@ -64,7 +64,8 @@ STABLE_WIN_S = 0.3e-6   # 判"稳定高/低"的回看窗；⚠️ 不能按 us �
 
 def load_wave(path):
     """统一成 (t[], ch1[], ch2[])。"""
-    d = json.load(open(path))
+    with open(path) as f:
+        d = json.load(f)
     if "merged" in d:
         m = d["merged"]
         return m["t"], m["ch1"], m["ch2"]
@@ -319,24 +320,66 @@ def analyze(wave_path, spec_name="std", vdd=None, rp=None):
     vdd_used = float(vdd) if vdd else max(H1, H2)
     vil_max = 0.3 * vdd_used
     vih_min = 0.7 * vdd_used
-    # ⚠️ 不能用 min/max 极值取电平：斜坡过渡点（50ns 内穿过阈值）会混进来，
+    # ⚠️ 不能用 min/max 极值取电平：斜坡过渡点（几十 ns 内穿过阈值）会混进来，
     #    实测把 VOL 当成 1.58V、VOH 当成 1.72V，DC 判定全假 FAIL。
-    #    正确做法：取低电平样本的 **98 分位**（VOL，含少量振铃余量）、
-    #    高电平样本的 **2 分位**（VOH），代表稳态电平。
+    # ⚠️ 也不能用 2%/98% 分位（2026-09-28 第二次踩到同一类坑）：
+    #    边沿过渡点占比 ~2~5%（本次 SCL 低电平 34.8 万点里过渡点约 1.6 万 = 4.6%），
+    #    2% 的余量不足以排除它，VOL 被报成 1.457 V，而稳态实测只有 0.118 V → 仍是假 FAIL。
+    #    正确做法：低电平取 **P90**、高电平取 **P10**，让出 10% 余量给过渡点，
+    #    既代表"稳态最坏值"又不会被斜坡污染。（P50 另存为典型值，便于人工对照。）
     def _pctile_of(vals, p):
         if not vals:
             return None
         z = sorted(vals)
         return z[min(len(z) - 1, max(0, int(p * len(z))))]
 
+    def _est_lsb(*series):
+        """从采样值反推 ADC 量化步长（LSB）：唯一取值排序后取相邻间隔的中位数。
+
+        为什么必须知道它（2026-09-28 实测）：
+          本机 CH1/CH2 = 2 V/div、8 bit → 满量程 16 V → LSB ≈ 62.5 mV。
+          实测低电平域（含 32 万个采样点）**只有 14 个不同取值**、步长 66.9 mV。
+          而规范 VOL 门限是 0.4 V —— 实测 SDA VOL=0.4109 V 与门限只差 11 mV，
+          **小于一个 LSB**。这种差异纯粹是量化不确定性，判 PASS 和判 FAIL 都不对。
+        """
+        u = set()
+        for s in series:
+            u.update(round(v, 6) for v in s)
+        z = sorted(u)
+        if len(z) < 3:
+            return None
+        d = sorted(b - a for a, b in zip(z, z[1:]) if b - a > 1e-7)
+        return d[len(d) // 2] if d else None
+
+    # 分通道各自估计再取中位：两个通道的量化网格相对错位，混在一起估会把步长算小
+    # （实测合并估得 42.1 mV，分通道均为 66.9 mV —— 真实 2 V/div、8 bit 满量程 16 V 的 LSB）
+    _cand = [v for v in (_est_lsb(y1), _est_lsb(y2)) if v]
+    lsb_v = sorted(_cand)[len(_cand) // 2] if _cand else None
+
+    def _vverdict(value, limit, over):
+        """电压门限三级判定：PASS / FAIL / INDET（量化不足）。
+
+        |value - limit| < 1 LSB → INDET：读数落在门限的量化不确定带里，
+        既不能算合格也不能算超标，必须换小档位重测。
+        """
+        if value is None:
+            return "NA"
+        if lsb_v and abs(value - limit) < lsb_v:
+            return "INDET"
+        return "FAIL" if (value > limit if over else value < limit) else "PASS"
+
     lows_scl = [v for v in y1 if v < T1]
     lows_sda = [v for v in y2 if v < T2]
     highs_scl = [v for v in y1 if v > T1]
     highs_sda = [v for v in y2 if v > T2]
-    vol_max_scl = _pctile_of(lows_scl, .98)
-    vol_max_sda = _pctile_of(lows_sda, .98)
-    voh_min_scl = _pctile_of(highs_scl, .02)
-    voh_min_sda = _pctile_of(highs_sda, .02)
+    vol_max_scl = _pctile_of(lows_scl, .90)
+    vol_max_sda = _pctile_of(lows_sda, .90)
+    voh_min_scl = _pctile_of(highs_scl, .10)
+    voh_min_sda = _pctile_of(highs_sda, .10)
+    vol_typ_scl = _pctile_of(lows_scl, .50)
+    vol_typ_sda = _pctile_of(lows_sda, .50)
+    voh_typ_scl = _pctile_of(highs_scl, .50)
+    voh_typ_sda = _pctile_of(highs_sda, .50)
     dc = {
         "vdd_v": round(vdd_used, 3),
         "vdd_source": "param" if vdd else "inferred_from_high",
@@ -346,15 +389,34 @@ def analyze(wave_path, spec_name="std", vdd=None, rp=None):
         "vol_sda_max_v": None if vol_max_sda is None else round(vol_max_sda, 4),
         "voh_scl_min_v": None if voh_min_scl is None else round(voh_min_scl, 4),
         "voh_sda_min_v": None if voh_min_sda is None else round(voh_min_sda, 4),
+        "vol_scl_typ_v": None if vol_typ_scl is None else round(vol_typ_scl, 4),
+        "vol_sda_typ_v": None if vol_typ_sda is None else round(vol_typ_sda, 4),
+        "voh_scl_typ_v": None if voh_typ_scl is None else round(voh_typ_scl, 4),
+        "voh_sda_typ_v": None if voh_typ_sda is None else round(voh_typ_sda, 4),
+        "pct_note": "VOL=VOH 取低/高电平样本的 P90/P10（稳态最坏值）；typ_* 为 P50 典型值。"
+                    "不用 P98/P2：边沿过渡点占比可达 4~5%，2% 余量兜不住（2026-09-28 实测踩坑）。",
+        "lsb_v": None if lsb_v is None else round(lsb_v, 6),
     }
+    # 量化步长相对门限偏大 → 判定不可靠，必须提示（不是每个档位都能判 0.4V 级的门限）
+    _tight = min(vil_max, 0.4)
+    if lsb_v and lsb_v > 0.1 * _tight:
+        dc["lsb_note"] = ("量化步长 %.1f mV 相对最小门限 %.3f V 偏大（%.0f%%）—— "
+                          "建议 DC 电气测量改用 ≤0.5 V/div 的小档位重抓，否则 VOL 判定不可靠。"
+                          % (lsb_v * 1e3, _tight, 100 * lsb_v / _tight))
+    else:
+        dc["lsb_note"] = None
     dc["checks"] = {}
     for ch, vlo, vhi in (("SCL", vol_max_scl, voh_min_scl),
                          ("SDA", vol_max_sda, voh_min_sda)):
-        dc["checks"][ch] = {
-            "vih_ok": (vhi is not None and vhi >= vih_min),
-            "vil_ok": (vlo is not None and vlo <= vil_max),
-            "vol_ok": (vlo is not None and vlo <= 0.4),   # 灌电流规范 VOL≤0.4V@3mA
+        c = {
+            "vih": _vverdict(vhi, vih_min, over=False),
+            "vil": _vverdict(vlo, vil_max, over=True),
+            "vol": _vverdict(vlo, 0.4, over=True),   # 灌电流规范 VOL≤0.4V@3mA
         }
+        c["vih_ok"] = c["vih"] == "PASS"      # 保留布尔字段，兼容既有调用方
+        c["vil_ok"] = c["vil"] == "PASS"
+        c["vol_ok"] = c["vol"] == "PASS"
+        dc["checks"][ch] = c
     # 总线电容 Cb 反推：Cb = Tr / (0.8473 * Rp)（UM10204 §7.2，Rp 入参给）
     if rp:
         tr_scl = dec.get("scl_transition", {}).get("tr")
@@ -507,7 +569,7 @@ def analyze(wave_path, spec_name="std", vdd=None, rp=None):
         th = c.get("tHIGH_max_us")
         if th is not None and spec.get("tHIGH_max") and th > spec["tHIGH_max"] * 1e6:
             dec["notes"].append(
-                "⚠️ SMBus：本段出现 SCL 高电平 %.2f us > 50 us 上限，"
+                "[!] SMBus：本段出现 SCL 高电平 %.2f us > 50 us 上限，"
                 "可能被主机判为总线空闲而误触发；需核对是否被时钟拉伸卡死。"
                 % th)
         dec["notes"].append(
@@ -558,15 +620,24 @@ def fmt(dec, path_out=None):
         lines.append("VDD = %.3f V (%s)" % (d["vdd_v"], d["vdd_source"]))
         lines.append("VIH 下限 = %.4f V   VIL 上限 = %.4f V"
                      % (d["vih_min_v"], d["vil_max_v"]))
-        lines.append("VOH_min SCL=%s SDA=%s V"
+        lines.append("VOH_min SCL=%s SDA=%s V  (P10 稳态最坏值)"
                      % (d["voh_scl_min_v"], d["voh_sda_min_v"]))
-        lines.append("VOL_max SCL=%s SDA=%s V  (规范 VOL≤0.4V@3mA)"
+        lines.append("VOL_max SCL=%s SDA=%s V  (P90 稳态最坏值; 规范 VOL≤0.4V@3mA)"
                      % (d["vol_scl_max_v"], d["vol_sda_max_v"]))
+        if d.get("vol_scl_typ_v") is not None:
+            lines.append("VOL_typ SCL=%s SDA=%s V  |  VOH_typ SCL=%s SDA=%s V  (P50 典型)"
+                         % (d["vol_scl_typ_v"], d["vol_sda_typ_v"],
+                            d["voh_scl_typ_v"], d["voh_sda_typ_v"]))
+        lines.append("量化步长 LSB = %s"
+                     % ("%.1f mV" % (d["lsb_v"] * 1e3) if d.get("lsb_v") else "未知"))
+        _vt = {"PASS": "[PASS]", "FAIL": "[FAIL]", "INDET": "[?]", "NA": "N/A"}
         for ch, c in d["checks"].items():
-            lines.append("  %s 判定: VIH=%s VIL=%s VOL=%s"
-                         % (ch, "✅" if c["vih_ok"] else "❌",
-                            "✅" if c["vil_ok"] else "❌",
-                            "✅" if c["vol_ok"] else "❌"))
+            lines.append("  %-4s  判定: VIH=%s  VIL=%s  VOL=%s"
+                         % (ch, _vt.get(c.get("vih", "NA"), "?"),
+                            _vt.get(c.get("vil", "NA"), "?"),
+                            _vt.get(c.get("vol", "NA"), "?")))
+        if d.get("lsb_note"):
+            lines.append("  [!] %s" % d["lsb_note"])
         if d["cb_pf"] is not None:
             lines.append("总线电容 Cb ≈ %.2f pF（由 Tr 反推, Rp=%.0fΩ, ≤400pF 规范）"
                          % (d["cb_pf"], d["rp_ohm"]))
@@ -578,11 +649,11 @@ def fmt(dec, path_out=None):
         lines.append("")
         lines.append("=== 时钟拉伸 ===")
         if cs["n"]:
-            lines.append("⚠️ 检测出 %d 段 SCL 低电平延长 >3×正常 tLOW；最长 %.4f µs"
-                         "（正常 tLOW≈%.4f µs）—— 从机/主机时钟拉伸或卡死"
+            lines.append("[!] 检测出 %d 段 SCL 低电平延长 >3x正常 tLOW；最长 %.4f us"
+                         "（正常 tLOW=%.4f us）—— 从机/主机时钟拉伸或卡死"
                          % (cs["n"], cs["max_us"], cs["normal_tlow_us"]))
         else:
-            lines.append("未检出时钟拉伸（所有 SCL 低段均在正常 tLOW 量级 %.4f µs）"
+            lines.append("未检出时钟拉伸（所有 SCL 低段均在正常 tLOW 量级 %.4f us）"
                          % (cs["normal_tlow_us"] or 0))
     # --- 毛刺 ---
     sp = dec.get("spikes")

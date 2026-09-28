@@ -113,6 +113,27 @@ class Scope:
                     return "<timeout>"
         return "<timeout>"
 
+    def q_short(self, c, timeout=3.0, retries=1):
+        """**短超时**查询——专用于「RUN 态下会挂满 socket 超时」的命令。
+
+        ⚠️ 2026-09-28 在 DSO-X 6004A (10.121.136.251) 实测：`:TRIGger:STATus?`
+        在 **RUN 且未触发** 时不返回，一直挂到 socket 超时（6 s 超时 → 6.0 s 才吐
+        `<timeout>`）。用默认 `retries=3` + 常见 60 s 超时 = **假死 3 分钟**，
+        现场表现为「脚本卡住、一行输出都没有」——极容易被误判成仪器掉线。
+
+        正确用法：摸底先 `:STOP`，或对这条查询用本方法；判断"有没有信号"直接看
+        波形边沿数，比触发状态可靠得多。:TRIGger:MODE? / :SWEep? 不受影响。
+        """
+        old = self.s.gettimeout()
+        self.s.settimeout(timeout)
+        try:
+            return self.q(c, retries=retries)
+        finally:
+            try:
+                self.s.settimeout(old)
+            except Exception:
+                pass
+
     def qf(self, c, default=None):
         """查询并转 float。无效读数/超时返回 default。"""
         s = self.q(c)
@@ -192,7 +213,8 @@ class Scope:
         st["trigger"] = {
             "mode": self.q(":TRIGger:MODE?"),
             "sweep": self.q(":TRIGger:SWEep?"),
-            "status": self.q(":TRIGger:STATus?"),
+            # ★ 必须走 q_short：RUN 态下这条查询会挂满 socket 超时（详见 q_short 文档）
+            "status": self.q_short(":TRIGger:STATus?", timeout=3.0),
         }
         st["running"] = self.q(":OPERegister:CONDition?")
         st["marker_mode"] = self.q(":MARKer:MODE?")
@@ -308,6 +330,42 @@ class Scope:
         with open(path, "wb") as f:
             f.write(data)
         return len(data)
+
+    # 本机 :SCReen:DUMP? 可用性缓存（None=未测，False=已确认不可用）
+    _dump_ok = None
+
+    def screenshot_best(self, path, inksaver_off=True, probe_timeout=15.0):
+        """**自动选可用路径**的截图。返回实际使用的路径名。
+
+        ⚠️ `:SCReen:DUMP?` 并非每台机都支持：实测 2026-09-28 在
+        DSO-X 6004A `10.121.136.251` 上，**RUN 态 60 s / STOP 态 30 s 均超时、零字节**，
+        而 `:DISPlay:DATA?` 正常。差别很要命：
+          - `:SCReen:DUMP?` = **黑底整屏，X1/X2/ΔX/1÷ΔX 全渲染**
+          - `:DISPlay:DATA?` = 白底，**只渲染 X2，X1 不画**
+        所以本方法只负责"能出图"；拿到 "DISPlay:DATA" 时**必须在报告里如实标注**，
+        不能用它冒充完整游标图。可用性只探测一次并缓存到类变量。
+        """
+        if Scope._dump_ok is not False:
+            old = self.s.gettimeout()
+            try:
+                self.s.settimeout(probe_timeout)
+                self.screenshot_dump(path, inksaver_off=inksaver_off)
+                Scope._dump_ok = True
+                return "SCReen:DUMP"
+            except Exception:
+                Scope._dump_ok = False
+                # 超时会把 socket 读脏，重连一次再走降级路径
+                try:
+                    self.reconnect()
+                except Exception:
+                    pass
+            finally:
+                try:
+                    self.s.settimeout(old)
+                except Exception:
+                    pass
+        self.screenshot(path)
+        return "DISPlay:DATA"
 
     # ---------- 测量面板 ----------
 

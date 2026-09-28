@@ -28,18 +28,24 @@ import sys, os, socket, time, argparse, json
 
 import numpy as np
 
-# 复用 keysight-scope-scpi 的实战解码器
-_SCOPE_SKILL = os.path.normpath(os.path.join(
-    os.path.dirname(__file__), "..", "..", "keysight-scope-scpi", "scripts"))
-if os.path.isdir(_SCOPE_SKILL) and _SCOPE_SKILL not in sys.path:
-    sys.path.insert(0, _SCOPE_SKILL)
+# 复用本 skill 的实战解码器（本地 scripts/i2c_decode.py，含逐点步长、二分定位、最紧值判定）
+# 当本地导入失败时（如 skill 被打包），退而尝试从 keysight-scope-scpi skill 导入（共享同套解码器源码）
+_LOCAL = os.path.dirname(os.path.abspath(__file__))
+if _LOCAL not in sys.path:
+    sys.path.insert(0, _LOCAL)
 try:
     from i2c_decode import analyze as decode_analyze, fmt as decode_fmt  # noqa
 except ImportError:
-    sys.stderr.write(
-        "缺少依赖：请先安装 keysight-scope-scpi skill（含 scripts/i2c_decode.py）。\n"
-        "该解码器含逐点步长、二分定位、最紧值判定等修复，本 skill 直接复用。\n")
-    decode_analyze = None
+    _FALLBACK = os.path.normpath(os.path.join(_LOCAL, "..", "..", "keysight-scope-scpi", "scripts"))
+    if os.path.isdir(_FALLBACK) and _FALLBACK not in sys.path:
+        sys.path.insert(0, _FALLBACK)
+    try:
+        from i2c_decode import analyze as decode_analyze, fmt as decode_fmt  # noqa
+    except ImportError:
+        sys.stderr.write(
+            "缺少 i2c_decode.py：本地 scripts/ 和 keysight-scope-scpi skill 均未找到。\n"
+            "该解码器含逐点步长、二分定位、最紧值判定等修复。\n")
+        decode_analyze = None
 
 
 # ---------------- 精简 SCPI 客户端（独立可运行） ----------------

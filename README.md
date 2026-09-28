@@ -40,19 +40,23 @@
 ## 快速开始
 
 ```bash
-cd scripts
+# 判定前必须先跑：纯函数自测（33 项）
+python run_i2c_test.py selftest
 
-# 1) 判定前必须先跑：纯函数自测（33 项）
-python selftest.py
+# 无真机沙箱：端到端跑通在线链路
+python run_i2c_test.py sandbox
 
-# 2) 无真机沙箱：端到端跑通在线链路
-python sandbox_test.py
+# 全量覆盖报告（不连真机）
+python run_i2c_test.py full
 
-# 3) 全量覆盖报告（不连真机）
-python full_lowspeed_test.py
+# 连真机：完整流水线
+python run_i2c_test.py test --ip <示波器IP> --addr 0x5B --spec std --out D:/_scope_tmp/0x5B
 
-# 4) 连真机一键流水线
-python i2c_full_test.py --ip <示波器IP> --addr 0x5B --spec std --out D:/_scope_tmp/0x5B
+# 多地址批量（逗号分隔）
+python run_i2c_test.py batch --ip <示波器IP> --addr 0x58,0x59,0x5A,0x5B
+
+# 查看全部子命令
+python run_i2c_test.py --help
 ```
 
 ## 覆盖范围与边界
@@ -76,14 +80,18 @@ python i2c_full_test.py --ip <示波器IP> --addr 0x5B --spec std --out D:/_scop
 
 ## 环境
 
-- Python 3.10+（用到 `statistics`、`bisect`）
-- 依赖：`numpy`；可选 `rapidocr-onnxruntime`（截图 OCR 验收）、`openpyxl`（Excel 回填）
+- Python 3.9+（用到 `statistics`、`bisect`）
+- 依赖（见 `requirements.txt`）：`numpy>=1.20.0`；可选 `rapidocr-onnxruntime>=1.2.0`（截图 OCR 验收）、`openpyxl>=3.0.0`（Excel 回填）
 - 真机：Keysight/Agilent InfiniiVision 系列，SCPI over TCP 5025
 
 ## 目录
 
 ```
-SKILL.md                 能力说明与完整工作流
+SKILL.md                 能力说明与完整工作流（version 1.0.0）
+run_i2c_test.py          统一快速启动入口
+requirements.txt         Python 依赖声明
+VERSION                  版本号
+CHANGELOG.md             完整变更日志
 scripts/                 全部脚本
 references/              I²C 规格表 / SCPI 手册 / 坑位汇编
 ```

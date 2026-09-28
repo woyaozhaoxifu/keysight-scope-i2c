@@ -61,7 +61,12 @@ def main():
     srv.stop()
 
     # ---- 合理性断言 ----
-    dec = json.load(open(os.path.join(out, "decode.json"), encoding="utf-8"))
+    dec_path = os.path.join(out, "decode.json")
+    if not os.path.exists(dec_path):
+        print("\n[!] decode.json 未生成（decode 步骤失败）。跳过合理性断言。")
+        print("    请检查上方 [FAIL] decode 行的错误信息。")
+        return 1
+    dec = json.load(open(dec_path, encoding="utf-8"))
     clk = dec["clock"]
     assert clk["f_khz"] > 50, "fSCL 异常偏低"
     assert dec["n_start"] >= 1 and dec["n_stop"] >= 1, "未解出 START/STOP"
@@ -72,9 +77,9 @@ def main():
     assert T["tSU_STA"]["value_us"] is not None, "tSU_STA 未算出（Sr 事务未生效）"
     assert dec["has_repeated_start"] is True, "未检测到重复 START(Sr)"
     print("  [OK]   重复 START(Sr) 检测 = True（复合读事务生效）")
-    # 时钟拉伸：事务1 地址 ACK 后从机延长 SCL 低 30µs → 应检出 ≥1 段
+    # 时钟拉伸：事务1 地址 ACK 后从机延长 SCL 低 30us -> 应检出 >=1 段
     assert dec["clock_stretch"]["n"] >= 1, "未检出时钟拉伸"
-    print("  [OK]   时钟拉伸检出 %d 段（最长 %.2f µs，正常 tLOW≈%.2f µs）"
+    print("  [OK]   时钟拉伸检出 %d 段（最长 %.2f us，正常 tLOW~%.2f us）"
           % (dec["clock_stretch"]["n"], dec["clock_stretch"]["max_us"],
              dec["clock_stretch"]["normal_tlow_us"]))
     # 毛刺：空闲段注入的 20ns SDA 尖峰 → 应计数 ≥1
@@ -86,12 +91,12 @@ def main():
         assert c["vih_ok"] and c["vil_ok"] and c["vol_ok"], "%s DC 判定 FAIL" % ch
     assert dc["cb_pf"] is not None, "Cb 未反推（缺 --rp）"
     assert dc["cb_pf"] <= 400.0, "Cb 反推超 400pF 规范"
-    print("  [OK]   DC 电气：VDD=%.2fV VIH/VIL/VOL 全 PASS；Cb≈%.2f pF（≤400pF）"
+    print("  [OK]   DC 电气：VDD=%.2fV VIH/VIL/VOL 全 PASS；Cb~%.2f pF（<=400pF）"
           % (dc["vdd_v"], dc["cb_pf"]))
-    # tBUF：mock 两笔事务间隔 ≈26µs
+    # tBUF：mock 两笔事务间隔 ≈26us
     if T["tBUF"]["value_us"] is not None:
-        assert abs(T["tBUF"]["value_us"] - 25.8) < 1.5, "tBUF 应为≈26µs"
-        print("  [OK]   tBUF ≈ %.3f µs（双事务间隔符合预期）" % T["tBUF"]["value_us"])
+        assert abs(T["tBUF"]["value_us"] - 25.8) < 1.5, "tBUF 应为~26us"
+        print("  [OK]   tBUF = %.3f us（双事务间隔符合预期）" % T["tBUF"]["value_us"])
     else:
         print("  [WARN] tBUF 为 NA（记录内仅单事务）")
 
@@ -102,22 +107,22 @@ def main():
     print("\n=== 结果 ===")
     print("fSCL      = %.2f kHz" % clk["f_khz"])
     print("START/STOP= %d / %d" % (dec["n_start"], dec["n_stop"]))
-    print("tSU_STA   = %.4f µs（含 Sr 复合读事务，真实验证）" % T["tSU_STA"]["value_us"])
-    print("tHD_STA   = %.4f µs" % T["tHD_STA"]["value_us"])
-    print("tSU_STO   = %.4f µs" % T["tSU_STO"]["value_us"])
-    print("tSU_DAT   = %.4f µs" % T["tSU_DAT"]["value_us"])
-    print("tHD_DAT   = %.4f µs" % T["tHD_DAT"]["value_us"])
-    print("时钟拉伸   = %d 段（最长 %.2f µs）" % (dec["clock_stretch"]["n"],
+    print("tSU_STA   = %.4f us（含 Sr 复合读事务，真实验证）" % T["tSU_STA"]["value_us"])
+    print("tHD_STA   = %.4f us" % T["tHD_STA"]["value_us"])
+    print("tSU_STO   = %.4f us" % T["tSU_STO"]["value_us"])
+    print("tSU_DAT   = %.4f us" % T["tSU_DAT"]["value_us"])
+    print("tHD_DAT   = %.4f us" % T["tHD_DAT"]["value_us"])
+    print("时钟拉伸   = %d 段（最长 %.2f us）" % (dec["clock_stretch"]["n"],
                                                 dec["clock_stretch"]["max_us"]))
     print("毛刺(tSPIKE)= %d 处" % dec["spikes"]["n"])
-    print("DC Cb     ≈ %.2f pF（VDD=%.2fV）" % (dc["cb_pf"], dc["vdd_v"]))
+    print("DC Cb     = %.2f pF（VDD=%.2fV）" % (dc["cb_pf"], dc["vdd_v"]))
     print("取证截图   = %d 张 -> %s" % (len(pngs), shots_dir))
 
     if fails[0] == 0:
-        print("\n✅ 沙箱验证全部通过：在线链路（含 mock 取数/截图）代码路径无崩溃，"
+        print("\n[OK] 沙箱验证全部通过：在线链路（含 mock 取数/截图）代码路径无崩溃，"
               "波形解出合理 I2C 时序。")
         return 0
-    print("\n⚠️ 沙箱验证 %d 项失败" % fails[0])
+    print("\n[!] 沙箱验证 %d 项失败" % fails[0])
     return 1
 
 
